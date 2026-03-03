@@ -361,5 +361,162 @@ WHERE ( 1=1)
 
 
 -- 18.9. RECURSIVE JOINS
+
+-- Lưu ý cú pháp T-SQL (SQL Server)
+-- Trong SQL Server/SSMS, chúng ta KHÔNG dùng từ khóa RECURSIVE
+-- Cú pháp chỉ bắt đầu bằng chữ WITH (Common Table Expression thông thường),
+-- bản thân SQL Server sẽ tự nhận diện tính đệ quy khi bạn gọi lại tên CTE ở bên trong nó.
+
+
+-- Để luyện Đệ quy (Parent-Child), bảng kinh điển nhất trong các hệ thống ERP là bảng Định mức vật tư - BOM (Bill of Materials)
+
+-- Bảng Production.BillOfMaterials: Bảng chứa công thức lắp ráp.
+---- Ý nghĩa: Để làm ra một chiếc xe đạp (Parent), cần có Bánh xe, Khung xe (Child)
+---- Để làm ra Bánh xe (Parent của cấp tiếp theo), lại cần Căm xe, Lốp xe (Child của Bánh xe).
+-- Cột quan trọng
+---- ProductAssemblyID (Mã sản phẩm cha/Lắp ráp), ComponentID (Mã linh kiện con), EndDate (Ngày kết thúc công thức - dùng để lọc các công thức cũ).
+
+-- Bảng Production.Product:
+---- Ý nghĩa: Chứa tên thực tế của các mã ID trên để ta dễ đọc hiểu.
+
+
+-- Đề bài
+-- Bóc tách toàn bộ linh kiện đa cấp cấu thành nên chiếc xe đạp 'Touring-1000 Blue, 60' (có ProductID = 749).
+-- Hãy liệt kê các linh kiện con, cháu, chắt... và đánh dấu xem chúng nằm ở độ sâu thứ mấy (Level) trong quy trình lắp ráp.
+
+-- Giải quyết vấn đề & Các lỗi "chí mạng" thường gặp
+-- Tại sao? Làm sao?
+-- Tại sao dùng CTE đệ quy?
+---- Vì ta không biết một chiếc xe đạp có bao nhiêu cấp bậc lắp ráp (có thể là 3 cấp, có thể là 10 cấp)
+---- JOIN thông thường (Self-Join) chỉ giải quyết được số cấp cố định
+
+-- Làm sao nó hoạt động?
+-- Đệ quy trong SQL gồm 2 phần nối với nhau bằng UNION ALL
+-- 1. Anchor member (Phần neo): Khởi tạo gốc của cái cây (Lấy ngay linh kiện trực tiếp của xe đạp 749 - gọi là Level 0).
+-- 2. Recursive member (Phần đệ quy): Lặp lại việc tìm kiếm. Tìm những linh kiện có Sản phẩm cha chính là Linh kiện con vừa tìm được ở bước trên. Đếm Level + 1.
+
+
+-- Lỗi sai người học hay mắc phải
+---- Lỗi 1: Dùng UNION thay vì UNION ALL.
+-- Lỗi cực phổ biến. CTE đệ quy BẮT BUỘC phải dùng UNION ALL
+-- Nếu dùng UNION, SQL Server sẽ cố gắng loại bỏ dòng trùng lặp, làm phá vỡ cơ chế duyệt đệ quy (engine sẽ ném ra lỗi cú pháp ngay lập tức).
+
+-- Lỗi 2: Tràn kiểu dữ liệu (Data Type Mismatch) ở cột tự tạo.
+-- Nếu ở phần neo bạn khai báo đường dẫn CAST(ID AS VARCHAR(10)),
+-- nhưng khi đệ quy nó cộng dồn lên thành 1->2->3->4 vượt quá 10 ký tự, query sẽ chết.
+-- Cách xử lý: Luôn CAST rộng rãi (VD: VARCHAR(MAX)) ở phần neo nếu định làm cột đường dẫn.
+--
+-- Lỗi 3: Vòng lặp vô hạn (Infinite Loop).
+-- Vấn đề: Do dữ liệu rác (A là cha của B, B lại là cha của A). Query chạy mãi không dừng.
+-- Cách xử lý: Dùng Option MAXRECURSION ở cuối câu truy vấn để giới hạn an toàn.
+
+WITH BOM_Hierarchy AS (
+
+		-- 1. ANCHOR MEMBER (Phần neo): Điểm bắt đầu 
+		SELECT 
+				BOM.ProductAssemblyID AS ParentID, 
+				BOM.ComponentID       AS ChildID,
+				P.[Name]			  AS ComponentName, 
+				0                     AS AssemblyLevel  -- Khởi tạo cấp độ 0 
+
+		FROM Production.BillOfMaterials AS BOM 
+		JOIN Production.[Product] AS P 
+		ON BOM.ComponentID = P.ProductID 
+
+		WHERE BOM.ProductAssemblyID = 749 -- Móc ngoạc vào sản phẩm gốc 
+			  AND BOM.EndDate IS NULL 
+
+		--- 
+		UNION ALL 
+		---
+
+
+		-- 2. RECORSIVE MEMBER : Vòng lặp đệ quy 
+		SELECT 
+				BOM.ProductAssemblyID , 
+				BOM.ComponentID       ,
+				P.[Name]			  , 
+				CTE.AssemblyLevel + 1				-- Tăng cấp độ lên 1 mỗi lần lùi sâu vào 
+		FROM Production.BillOfMaterials AS BOM 
+		JOIN Production.[Product] AS P ON BOM.ComponentID = P.ProductID 
+		-- Nối với chính CTE (Common Table Expression) ở đây:
+		-- Tìm linh kiện (BOM) có ID cha BẰNG VỚI ID con của cấp trước đó (CTE) 
+		JOIN BOM_Hierarchy AS CTE 
+			ON BOM.ProductAssemblyID = CTE.ChildID 
+
+		WHERE BOM.EndDate IS NULL 
+		
+)
+		-- 3. TRUY XUẤT KẾT QUẢ VÀ CHỐNG LẶP VÔ HẠN 
+		SELECT 
+			ParentID,
+			ChildID,
+			ComponentName,
+			AssemblyLevel
+		FROM BOM_Hierarchy 
+		ORDER BY AssemblyLevel, ComponentName 
+		OPTION (MAXRECURSION 100) -- Giới hạn an toàn: Lặp tối đa 100 cấp (SQL Server mặc định là 100, nhưng ghi ra để nhớ)
+		
 -- 18.10.BASIC EXPLICIT INNER JOIN 
- -- 18.1. 
+
+-- Tại sao Microsoft lại tách thông tin nhân viên ra làm 2 bảng?
+-- Đó là tư duy chuẩn hóa dữ liệu (Normalization)
+-- Một người có thể là nhân viên, cũng có thể mua hàng (khách hàng), nên thông tin cá nhân phải là duy nhất và dùng chung.
+
+-- Chúng ta sẽ dùng 2 bảng:
+-- Bảng 1: Person.Person (Dữ liệu cá nhân cốt lõi)
+---- Ý nghĩa: Nơi lưu trữ thông tin định danh (Tên, Họ) của tất cả mọi người trong hệ thống (Nhân viên, Khách hàng, Đối tác)
+
+
+-- Bảng 2: HumanResources.Employee (Dữ liệu nhân sự)
+-- Ý nghĩa: Nơi lưu các thông tin thuần túy về mặt công việc. Bảng này không có cột Tên!
+-- Cột quan trọng: BusinessEntityID (Mã nhân viên - liên kết 1:1 với bảng Person), JobTitle (Chức danh), HireDate (Ngày thuê).
+
+-- Yêu cầu: Xuất danh sách thông tin cơ bản của toàn bộ nhân viên nội bộ. 
+-- Kết quả cần hiển thị Mã nhân viên, Tên, Họ và Chức danh công việc của người đó.
+
+SELECT
+	e.BusinessEntityID AS EmployeeID,
+	p.FirstName,
+	p.LastName,
+	e.JobTitle         AS Position
+FROM HumanResources.Employee AS e 
+-- INNER JOIN (Có thể viết tắt là JOIN, SSMS tự hiểu là INNER)
+INNER JOIN Person.Person AS p ON e.BusinessEntityID = p.BusinessEntityID 
+ORDER BY e.JobTitle, p.FirstName 
+
+
+
+ -- 18.11. Joining on a Subquery
+
+ -- Yêu cầu: Xem danh sách tất cả các Đơn đặt hàng (Mã đơn, Ngày đặt, Mã NCC)
+ -- Đồng thời, kế bên mỗi đơn hàng, hãy hiển thị Tổng số lượng mặt hàng khác nhau đã mua và Tổng giá trị tiền của đơn hàng đó.
+
+
+ SELECT 
+		-- 1. Lấy thông tin từ bảng Cha
+		POH.PurchaseOrderID, 
+		POH.OrderDate,
+		POH.VendorID,
+
+		-- 2. Lấy dữ liệu tổng hợp từ Bảng ảo (Subquery)
+		-- Dùng ISNULL để đề phòng đơn hàng rỗng (chưa có chi tiết) thì trả về 0
+		ISNULL(POD_Agg.TotalItems, 0) AS TotalItems, 
+		ISNULL(POD_Agg.TotalOrderValue, 0) AS TotalOrderValue
+
+
+ FROM Purchasing.PurchaseOrderHeader AS POH 
+ -- JOIN vs SUBQUERY 
+ LEFT JOIN 
+ (
+	SELECT 
+		PurchaseOrderID,
+		COUNT(PurchaseOrderDetailID) AS TotalItems ,
+		SUM(LineTotal)               AS TotalOrderValue 
+	FROM	Purchasing.PurchaseOrderDetail d
+	GROUP BY PurchaseOrderID
+ ) AS POD_Agg -- BẮT BUỘC PHẢI CÓ ALIAS CHO SUBQUERY TẠI ĐÂY 
+	
+	ON POH.PurchaseOrderID = POD_Agg.PurchaseOrderID 
+	ORDER BY POH.OrderDate DESC
+
